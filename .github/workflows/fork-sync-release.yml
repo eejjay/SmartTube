@@ -1,0 +1,162 @@
+name: Sync upstream + release
+
+# Keeps this fork in sync with yuliskov/SmartTube and publishes signed builds
+# to the "latest" release, which the in-app updater (stbeta flavor) checks.
+#
+# - Daily: merge upstream master. Nothing new -> stop. Conflict -> job fails (GitHub emails you).
+# - Push to master / manual run: always build + release.
+
+on:
+  schedule:
+    - cron: '17 4 * * *'   # daily 04:17 UTC
+  push:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+concurrency:
+  group: fork-sync-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM: https://github.com/yuliskov/SmartTube
+  RELEASE_TAG: latest
+  APK_DIR: smarttubetv/build/outputs/apk/stbeta/release
+
+jobs:
+  sync-build-release:
+    if: github.repository == 'eejjay/SmartTube'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Merge upstream master
+        id: sync
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --no-tags "$UPSTREAM" master:refs/remotes/upstream/master
+
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "Already up to date with upstream."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            if ! git merge --no-edit -m "Merge upstream yuliskov/SmartTube master" upstream/master; then
+              echo "::error::Merge conflict with upstream. Resolve manually: git fetch $UPSTREAM master && git merge FETCH_HEAD"
+              git diff --name-only --diff-filter=U
+              exit 1
+            fi
+            if ! git push origin HEAD:master; then
+              echo "::error::Push rejected. If upstream changed .github/workflows, the Actions token may not push it - sync once manually (GitHub 'Sync fork' button)."
+              exit 1
+            fi
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide whether to build
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ] || [ "${{ steps.sync.outputs.changed }}" = "true" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "No upstream changes - skipping build."
+          fi
+
+      - name: Init submodules + apply fork patches
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          git submodule update --init --recursive --depth 50
+          for p in patches/MediaServiceCore/*.patch; do
+            [ -e "$p" ] || continue
+            echo "Applying $p"
+            git -C MediaServiceCore apply --3way "../$p"
+          done
+
+      - name: Set up JDK 17
+        if: steps.gate.outputs.build == 'true'
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Set version (code must grow for the updater)
+        if: steps.gate.outputs.build == 'true'
+        id: ver
+        run: |
+          F=smarttubetv/build.gradle
+          BASE_CODE=$(grep -m1 -oP 'versionCode \K[0-9]+' $F)
+          BASE_NAME=$(grep -m1 -oP 'versionName "\K[^"]+' $F)
+          CODE=$(( BASE_CODE * 10000 + GITHUB_RUN_NUMBER % 10000 ))
+          NAME="${BASE_NAME}-ej${GITHUB_RUN_NUMBER}"
+          sed -i "0,/versionCode [0-9]\+/s//versionCode $CODE/" $F
+          sed -i "0,/versionName \"[^\"]*\"/s//versionName \"$NAME\"/" $F
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "Version $NAME ($CODE)"
+
+      - name: Configure signing
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          if [ -z "${{ secrets.SIGNING_KEY }}" ]; then
+            echo "::error::SIGNING_KEY secret missing - an unsigned APK cannot be installed or auto-updated."
+            exit 1
+          fi
+          echo "storePassword=${{ secrets.KEY_STORE_PASSWORD }}" > keystore.properties
+          echo "keyAlias=${{ secrets.ALIAS }}" >> keystore.properties
+          echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> keystore.properties
+          echo "storeFile=${{ github.workspace }}/key.jks" >> keystore.properties
+          echo "${{ secrets.SIGNING_KEY }}" | base64 --decode > "${{ github.workspace }}/key.jks"
+
+      - name: Build
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          chmod +x gradlew
+          ./gradlew clean assembleStbetaRelease
+
+      - name: Stage APKs + update manifest
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          mkdir -p dist
+          for abi in arm64-v8a armeabi-v7a x86 universal; do
+            src=$(ls "$APK_DIR"/*_"$abi".apk | head -n1)
+            cp "$src" "dist/SmartTube_beta_${abi}.apk"
+          done
+          ls -l dist
+
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          git log --no-merges -15 --format='%s' > /tmp/changelog.txt
+          jq -n \
+            --arg base "$BASE" \
+            --arg name "${{ steps.ver.outputs.name }}" \
+            --argjson code "${{ steps.ver.outputs.code }}" \
+            --rawfile log /tmp/changelog.txt \
+            '{
+              package: {
+                "downloadUrlList_arm64-v8a":   [ "\($base)/SmartTube_beta_arm64-v8a.apk" ],
+                "downloadUrlList_armeabi-v7a": [ "\($base)/SmartTube_beta_armeabi-v7a.apk" ],
+                "downloadUrlList_x86":         [ "\($base)/SmartTube_beta_x86.apk" ],
+                "downloadUrlList":             [ "\($base)/SmartTube_beta_universal.apk" ]
+              }
+            } + { ($name): { versionCode: $code, changelog: ($log | split("\n") | map(select(length > 0))) } }' \
+            > dist/smarttube_beta2.json
+          cat dist/smarttube_beta2.json
+
+      - name: Publish release
+        if: steps.gate.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "$RELEASE_TAG" --cleanup-tag -y || true
+          gh release create "$RELEASE_TAG" dist/* \
+            --target "$(git rev-parse HEAD)" \
+            --title "SmartTube ${{ steps.ver.outputs.name }}" \
+            --notes "Auto-built from yuliskov/SmartTube + fork patches. Version code ${{ steps.ver.outputs.code }}." \
+            --latest

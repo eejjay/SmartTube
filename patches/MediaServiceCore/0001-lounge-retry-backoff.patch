@@ -1,0 +1,48 @@
+From d1b190b46b853dbf0fbb2ef2944ea0be312d433c Mon Sep 17 00:00:00 2001
+From: Mohammad Mustafa Ghazi <official.ghazi.alpha@gmail.com>
+Date: Fri, 31 Jul 2026 16:16:53 +0530
+Subject: [PATCH] Fix tight retry-storm in LoungeService reconnect loop
+
+The generic catch(Exception) branch in startListening() had no backoff
+delay, unlike the normal-path Thread.sleep(3000) after a clean
+disconnect. When startListeningInt() throws a persistent error (e.g.
+UnknownHostException right after the TV's WiFi wakes from sleep, before
+DNS is actually reachable again), the loop retried in a tight busy-loop
+every ~10ms, hammering CPU/DNS instead of giving the network a chance to
+recover, and preventing the cast session from ever successfully
+(re)binding.
+
+Part of the SmartTube wake-on-cast-while-asleep fix; see
+WAKE_ON_CAST_FIX.md in the SmartTube repo for the full diagnosis.
+
+(cherry picked from commit 57d9e489e376f5cd70ec1f0d06a4be593457162f)
+---
+ .../liskovsoft/youtubeapi/lounge/LoungeService.java   | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/youtubeapi/src/main/java/com/liskovsoft/youtubeapi/lounge/LoungeService.java b/youtubeapi/src/main/java/com/liskovsoft/youtubeapi/lounge/LoungeService.java
+index 6385a35..33a7a11 100644
+--- a/youtubeapi/src/main/java/com/liskovsoft/youtubeapi/lounge/LoungeService.java
++++ b/youtubeapi/src/main/java/com/liskovsoft/youtubeapi/lounge/LoungeService.java
+@@ -117,7 +117,18 @@ public class LoungeService {
+                 e.printStackTrace();
+                 break;
+             } catch (Exception e) {
++                // NOTE: without a backoff delay here, a persistent failure (e.g. UnknownHostException
++                // right after the TV wakes from sleep, before WiFi/DNS is actually back up) turns this
++                // into a tight busy-loop retrying every few milliseconds, hammering CPU/DNS and never
++                // giving the network a chance to recover in between attempts. Sleeping between retries
++                // gives WiFi/DNS time to come back up, same as the normal-path delay above.
+                 Log.e(TAG, e.getMessage());
++                try {
++                    Thread.sleep(2_000);
++                } catch (InterruptedException interrupted) {
++                    Log.e(TAG, "Oops. Stopping. Listening thread interrupted.");
++                    break;
++                }
+                 // Continue to listen whichever is happening.
+             }
+         }
+-- 
+2.43.0
+
