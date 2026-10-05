@@ -1,7 +1,7 @@
 name: Sync upstream + release
 
 # Keeps this fork in sync with yuliskov/SmartTube and publishes signed builds
-# to the "latest" release, which the in-app updater (stbeta flavor) checks.
+# to the "latest" release, which the in-app updater (ststable flavor) checks.
 #
 # - Daily: merge upstream master. Nothing new -> stop. Conflict -> job fails (GitHub emails you).
 # - Push to master / manual run: always build + release.
@@ -23,7 +23,7 @@ permissions:
 env:
   UPSTREAM: https://github.com/yuliskov/SmartTube
   RELEASE_TAG: latest
-  APK_DIR: smarttubetv/build/outputs/apk/stbeta/release
+  APK_DIR: smarttubetv/build/outputs/apk/ststable/release
 
 jobs:
   sync-build-release:
@@ -119,7 +119,7 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         run: |
           chmod +x gradlew
-          ./gradlew clean assembleStbetaRelease
+          ./gradlew clean assembleStstableRelease
 
       - name: Stage APKs + update manifest
         if: steps.gate.outputs.build == 'true'
@@ -127,7 +127,7 @@ jobs:
           mkdir -p dist
           for abi in arm64-v8a armeabi-v7a x86 universal; do
             src=$(ls "$APK_DIR"/*_"$abi".apk | head -n1)
-            cp "$src" "dist/SmartTube_beta_${abi}.apk"
+            cp "$src" "dist/SmartTube_stable_${abi}.apk"
           done
           ls -l dist
 
@@ -140,14 +140,14 @@ jobs:
             --rawfile log /tmp/changelog.txt \
             '{
               package: {
-                "downloadUrlList_arm64-v8a":   [ "\($base)/SmartTube_beta_arm64-v8a.apk" ],
-                "downloadUrlList_armeabi-v7a": [ "\($base)/SmartTube_beta_armeabi-v7a.apk" ],
-                "downloadUrlList_x86":         [ "\($base)/SmartTube_beta_x86.apk" ],
-                "downloadUrlList":             [ "\($base)/SmartTube_beta_universal.apk" ]
+                "downloadUrlList_arm64-v8a":   [ "\($base)/SmartTube_stable_arm64-v8a.apk" ],
+                "downloadUrlList_armeabi-v7a": [ "\($base)/SmartTube_stable_armeabi-v7a.apk" ],
+                "downloadUrlList_x86":         [ "\($base)/SmartTube_stable_x86.apk" ],
+                "downloadUrlList":             [ "\($base)/SmartTube_stable_universal.apk" ]
               }
             } + { ($name): { versionCode: $code, changelog: ($log | split("\n") | map(select(length > 0))) } }' \
-            > dist/smarttube_beta2.json
-          cat dist/smarttube_beta2.json
+            > dist/smarttube_stable2.json
+          cat dist/smarttube_stable2.json
 
       - name: Publish release
         if: steps.gate.outputs.build == 'true'
