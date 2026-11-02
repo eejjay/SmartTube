@@ -52,6 +52,7 @@ public class RemoteControlService extends Service {
 
     @Override
     public void onDestroy() {
+        DialServer.startStop(false, null);
         releaseWakeLock();
 
         super.onDestroy();
@@ -103,12 +104,6 @@ public class RemoteControlService extends Service {
         updateDialServer();
 
         return START_STICKY;
-    }
-
-    @Override
-    public void onDestroy() {
-        DialServer.startStop(false, null);
-        super.onDestroy();
     }
 
     /**
